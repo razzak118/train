@@ -3,6 +3,11 @@ const path = require('path');
 const { fillFirst, pressEnter, pauseForUser, sleep, firstVisible } = require('./ui');
 
 const SELECTORS = {
+  menuButton: [
+    '.h_menu_drop_button.hidden-xs a:has(i.fa-align-justify)',
+    '.h_menu_drop_button a:has(i.fa-align-justify)',
+    'a:has(i.fa-align-justify)'
+  ],
   loginButton: [
     'a[aria-label*="Login in application"]',
     'a.loginText',
@@ -10,6 +15,13 @@ const SELECTORS = {
     'button:has-text("Login")',
     'a:has-text("LOGIN")',
     'text=LOGIN'
+  ],
+  loginSubmit: [
+    'button:has-text("SIGN IN")',
+    'button:has-text("Sign In")',
+    'button:has-text("LOGIN")',
+    'button[type="submit"]',
+    'input[type="submit"]'
   ],
   username: [
     'input[aria-label*="User Name"]',
@@ -56,21 +68,14 @@ function loadConfig() {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-async function openSite(page, config) {
-  console.log(`Opening ${config.url}`);
-  await page.goto(config.url, {
-    waitUntil: 'domcontentloaded',
-    timeout: 60000
-  });
-  await page.waitForTimeout(1000);
-
+async function handleLanguageDialogs(page, waitMs = 1000) {
   const welcomeDialog = page.locator('[role="dialog"]:visible').first();
   const englishButton = welcomeDialog
     .locator('button')
     .filter({ hasText: /^\s*English\s*$/i })
     .first();
 
-  if (await englishButton.isVisible({ timeout: 10000 }).catch(() => false)) {
+  if (await englishButton.isVisible({ timeout: waitMs }).catch(() => false)) {
     await englishButton.click();
     await welcomeDialog.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
   }
@@ -82,18 +87,35 @@ async function openSite(page, config) {
     .locator('button')
     .filter({ hasText: /^\s*OK\s*$/i })
     .first();
-  if (await okButton.isVisible({ timeout: 3000 }).catch(() => false)) {
+  if (await okButton.isVisible({ timeout: Math.min(waitMs, 3000) }).catch(() => false)) {
     await okButton.click();
     await confirmationDialog.waitFor({ state: 'hidden', timeout: 10000 }).catch(() => {});
   }
 }
 
+async function openSite(page, config) {
+  console.log(`Opening ${config.url}`);
+  await page.goto(config.url, {
+    waitUntil: 'domcontentloaded',
+    timeout: 60000
+  });
+  await page.waitForTimeout(1000);
+  await handleLanguageDialogs(page, 10000);
+}
+
 async function tryLogin(page, config) {
+  await handleLanguageDialogs(page);
   const user = process.env.IRCTC_USER;
   const password = process.env.IRCTC_PASSWORD;
   const usernameField = await firstVisible(page, LOGIN_FORM_SELECTORS);
 
   if (!usernameField) {
+    const menuButton = await firstVisible(page, SELECTORS.menuButton);
+    if (menuButton) {
+      await menuButton.click();
+      await page.waitForTimeout(400);
+    }
+
     let login = await firstVisible(page, SELECTORS.loginButton);
     if (!login) {
       await page.locator(SELECTORS.loginButton.join(', ')).first().waitFor({
@@ -131,11 +153,14 @@ async function tryLogin(page, config) {
   await visibleUsernameField.fill(user);
   await fillFirst(page, SELECTORS.password, password, 'IRCTC password field');
 
-  console.log('Credentials filled. CAPTCHA is intentionally left to you.');
-  await pauseForUser(
-    page,
-    'CAPTCHA CHECKPOINT: credentials are filled. Complete CAPTCHA and submit login in the browser, then press Enter here to start train search.'
-  );
+  const loginDialog = page.locator('app-login:visible, [role="dialog"]:visible').last();
+  const submit = loginDialog.locator(SELECTORS.loginSubmit.join(', ')).first();
+  if (!await submit.isVisible({ timeout: 2000 }).catch(() => false)) {
+    throw new Error('Login credentials were filled, but the Sign In button was not found.');
+  }
+  await submit.click();
+  await page.waitForTimeout(1500);
+  console.log('Credentials submitted. Continuing to train search.');
 }
 
 async function loginDialogVisible(page) {
@@ -155,6 +180,13 @@ async function handleLoginCheckpoint(page, config, reason) {
   if (usernameField && config.options.fillLoginCredentials && user && password) {
     await usernameField.fill(user);
     await fillFirst(page, SELECTORS.password, password, 'IRCTC password field');
+    const loginDialog = page.locator('app-login:visible, [role="dialog"]:visible').last();
+    const submit = loginDialog.locator(SELECTORS.loginSubmit.join(', ')).first();
+    if (await submit.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await submit.click();
+      await page.waitForTimeout(1500);
+      return true;
+    }
   }
 
   await pauseForUser(
@@ -191,8 +223,10 @@ async function dismissLoginPrompt(page) {
 
 async function withLoginRecovery(page, config, action, reason) {
   try {
+    await handleLanguageDialogs(page);
     return await action();
   } catch (error) {
+    await handleLanguageDialogs(page);
     if (!await handleLoginCheckpoint(page, config, reason)) throw error;
     return action();
   }
@@ -232,6 +266,8 @@ async function pageWaitForDateCommit(dateField) {
 
 async function fillJourney(page, config) {
   const { from, to, date } = config.journey;
+
+  await handleLanguageDialogs(page);
 
   await page.locator(SELECTORS.from[0]).waitFor({ state: 'visible', timeout: 30000 });
 
@@ -297,38 +333,52 @@ async function findTrainRow(page, trainNumber) {
   ).first();
 }
 
-async function refreshTrainClasses(row) {
-  const refreshControls = row.locator([
+function classCode(className) {
+  return className.match(/\(([A-Z0-9-]+)\)/i)?.[1] || className;
+}
+
+async function findClassSection(row, className) {
+  const code = classCode(className);
+  const label = row.getByText(new RegExp(`^\\s*${code}\\s*$`, 'i')).first();
+  if (!await label.isVisible({ timeout: 1500 }).catch(() => false)) return null;
+
+  return label.locator(
+    'xpath=ancestor::*[(self::td or self::li or contains(@class,"class") or contains(@class,"Class") or contains(@class,"avl") or contains(@class,"Avl"))][1]'
+  ).first();
+}
+
+async function refreshClass(section) {
+  if (!section) return false;
+  const refreshControls = section.locator([
     'button[aria-label*="refresh" i]',
     'button[title*="refresh" i]',
     '[role="button"][aria-label*="refresh" i]',
+    'button:has-text("Refresh")',
     '.fa-refresh',
     '.pi-refresh'
   ].join(', '));
-  const count = await refreshControls.count();
-
-  for (let index = 0; index < count; index += 1) {
-    const control = refreshControls.nth(index);
-    if (!await control.isVisible().catch(() => false)) continue;
-    await control.click().catch(async () => {
-      await control.locator('xpath=..').click().catch(() => {});
-    });
-    await sleep(500);
-  }
+  const control = refreshControls.first();
+  if (!await control.isVisible({ timeout: 1500 }).catch(() => false)) return false;
+  await control.click().catch(async () => {
+    await control.locator('xpath=..').click();
+  });
+  await sleep(800);
+  return true;
 }
 
-async function classHasAvailability(row, className) {
-  const rowText = await row.innerText().catch(() => '');
-  const classKey = className.match(/\(([A-Z0-9-]+)\)/i)?.[1] || className;
-  const classSection = row.getByText(new RegExp(classKey, 'i')).first();
-  if (!await classSection.isVisible({ timeout: 1000 }).catch(() => false)) return false;
-
-  const section = classSection.locator(
-    'xpath=ancestor::*[self::td or self::li or contains(@class,"class") or contains(@class,"Class")][1]'
-  ).first();
-  const text = await section.innerText().catch(() => rowText);
-  return /\b(?:AVAILABLE|AVL|RAC)\b/i.test(text) &&
+async function bookAvailableClass(section) {
+  if (!section) return false;
+  const text = await section.innerText().catch(() => '');
+  const available = /\b(?:AVAILABLE|AVL|RAC)\b/i.test(text) &&
     !/\b(?:WL|WAITING|REGRET|NOT\s+AVAILABLE|CANCELLED)\b/i.test(text);
+  if (!available) return false;
+
+  const book = section.locator(
+    'button:enabled, a, [role="button"]'
+  ).filter({ hasText: /BOOK(?: NOW)?/i }).first();
+  if (!await book.isVisible({ timeout: 1500 }).catch(() => false)) return false;
+  await book.click();
+  return true;
 }
 
 async function choosePreferredTrain(page, preferredTrains, className) {
@@ -353,21 +403,16 @@ async function choosePreferredTrain(page, preferredTrains, className) {
     if (!row) continue;
 
     await row.scrollIntoViewIfNeeded();
-    await refreshTrainClasses(row);
-    await page.waitForTimeout(700);
-
-    if (!await classHasAvailability(row, className)) {
-      console.log(`Train ${trainNumber} has no available ${className}; checking next train.`);
+    const section = await findClassSection(row, className);
+    if (!section || !await refreshClass(section)) {
+      console.log(`Sleeper refresh control not found for train ${trainNumber}.`);
       continue;
     }
 
-    const classKey = className.match(/\(([A-Z0-9-]+)\)/i)?.[1] || className;
-    const classControl = row.getByText(new RegExp(classKey, 'i')).first();
-    const action = classControl.locator(
-      'xpath=ancestor::*[self::td or self::li or contains(@class,"class") or contains(@class,"Class")][1]'
-    ).locator('button:enabled, [role="button"], a').first();
-
-    if (await action.isVisible({ timeout: 1500 }).catch(() => false)) await action.click();
+    if (!await bookAvailableClass(section)) {
+      console.log(`Train ${trainNumber} has no available ${className}; checking next train.`);
+      continue;
+    }
     console.log(`Selected ${trainNumber} with available ${className} seats.`);
     return true;
   }
