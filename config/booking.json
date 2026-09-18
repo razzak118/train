@@ -1,16 +1,16 @@
 {
   "url": "https://www.irctc.co.in/nget/train-search",
   "journey": {
-    "from": "KYN",
-    "to": "BUI",
-    "date": "25/09/2026",
+    "from": "BXR",
+    "to": "KYN",
+    "date": "14/11/2026",
     "class": "Sleeper (SL)",
     "quota": "GENERAL"
   },
   "preferredTrains": [
-    "12925",
-    "22943",
-    "19031"
+    "13201",
+    "12142",
+    "12335"
   ],
   "passengers": [
     {

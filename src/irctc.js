@@ -221,7 +221,7 @@ async function fillJourney(page, config) {
   await withLoginRecovery(page, config, () => pressEnter(toField), 'selecting the destination station');
 
   const dateFields = [
-    'input.ui-inputtext:not(.ui-autocomplete-input)',
+    'input.ui-inputtext:not(.ui-autocomplete-input):not([type="checkbox"])',
     'input[aria-label*="Enter Journey Date"]',
     'input[placeholder*="DD/MM/YYYY"]',
     'input[formcontrolname*="journey"]',
@@ -235,8 +235,11 @@ async function fillJourney(page, config) {
       page,
       config,
       async () => {
-        await dateField.fill(date);
-        await dateField.press('Tab');
+        await dateField.click();
+        await dateField.press('Control+A');
+        await dateField.press('Backspace');
+        await dateField.type(date, { delay: 40 });
+        await dateField.press('Enter');
         await page.waitForTimeout(300);
 
         const calendar = page.locator(
@@ -244,6 +247,11 @@ async function fillJourney(page, config) {
         ).first();
         if (await calendar.isVisible({ timeout: 500 }).catch(() => false)) {
           await dateField.press('Escape');
+        }
+
+        const enteredDate = await dateField.inputValue();
+        if (enteredDate !== date) {
+          throw new Error(`Journey date was not committed: expected ${date}, got ${enteredDate || '(empty)'}`);
         }
       },
       'filling the journey date'
@@ -267,34 +275,91 @@ async function fillJourney(page, config) {
   console.log('Journey search submitted.');
 }
 
-async function choosePreferredTrain(page, preferredTrains) {
-  if (!preferredTrains?.length) {
-    console.log('No preferred trains configured; leaving selection to the user.');
-    return false;
+async function findTrainRow(page, trainNumber) {
+  const number = page.getByText(String(trainNumber), { exact: true }).first();
+  if (!await number.isVisible({ timeout: 1500 }).catch(() => false)) return null;
+
+  return number.locator(
+    'xpath=ancestor::*[(self::tr or self::li or contains(@class,"train") or contains(@class,"Train")) and (.//button or .//*[@role="button"])][1]'
+  ).first();
+}
+
+async function refreshTrainClasses(row) {
+  const refreshControls = row.locator([
+    'button[aria-label*="refresh" i]',
+    'button[title*="refresh" i]',
+    '[role="button"][aria-label*="refresh" i]',
+    '.fa-refresh',
+    '.pi-refresh'
+  ].join(', '));
+  const count = await refreshControls.count();
+
+  for (let index = 0; index < count; index += 1) {
+    const control = refreshControls.nth(index);
+    if (!await control.isVisible().catch(() => false)) continue;
+    await control.click().catch(async () => {
+      await control.locator('xpath=..').click().catch(() => {});
+    });
+    await sleep(500);
+  }
+}
+
+async function classHasAvailability(row, className) {
+  const rowText = await row.innerText().catch(() => '');
+  const classKey = className.match(/\(([A-Z0-9-]+)\)/i)?.[1] || className;
+  const classSection = row.getByText(new RegExp(classKey, 'i')).first();
+  if (!await classSection.isVisible({ timeout: 1000 }).catch(() => false)) return false;
+
+  const section = classSection.locator(
+    'xpath=ancestor::*[self::td or self::li or contains(@class,"class") or contains(@class,"Class")][1]'
+  ).first();
+  const text = await section.innerText().catch(() => rowText);
+  return /\b(?:AVAILABLE|AVL|RAC)\b/i.test(text) &&
+    !/\b(?:WL|WAITING|REGRET|NOT\s+AVAILABLE|CANCELLED)\b/i.test(text);
+}
+
+async function choosePreferredTrain(page, preferredTrains, className) {
+  const preferred = preferredTrains?.map(String) || [];
+  const numberPattern = preferred.length ? preferred.join('|') : '\\d{4,5}';
+
+  await page.waitForFunction(
+    pattern => new RegExp(`\\b(?:${pattern})\\b`).test(document.body.innerText),
+    numberPattern,
+    { timeout: 45000 }
+  ).catch(() => {});
+
+  const numbers = [...preferred];
+  const visibleNumbers = await page.locator('text=/\\b\\d{4,5}\\b/').allTextContents().catch(() => []);
+  for (const value of visibleNumbers) {
+    const number = value.match(/\b\d{4,5}\b/)?.[0];
+    if (number && !numbers.includes(number)) numbers.push(number);
   }
 
-  for (const trainNumber of preferredTrains) {
-    const candidates = [
-      `text=${trainNumber}`,
-      `[data-train-number="${trainNumber}"]`,
-      `*:has-text("${trainNumber}")`
-    ];
+  for (const trainNumber of numbers) {
+    const row = await findTrainRow(page, trainNumber);
+    if (!row) continue;
 
-    for (const selector of candidates) {
-      const locator = page.locator(selector).first();
-      try {
-        if (await locator.isVisible({ timeout: 1200 })) {
-          console.log(`Found preferred train ${trainNumber}.`);
-          // We deliberately stop at the first matching train card/text and do not
-          // automate the final booking/payment confirmation.
-          await locator.scrollIntoViewIfNeeded();
-          return true;
-        }
-      } catch (_) {}
+    await row.scrollIntoViewIfNeeded();
+    await refreshTrainClasses(row);
+    await page.waitForTimeout(700);
+
+    if (!await classHasAvailability(row, className)) {
+      console.log(`Train ${trainNumber} has no available ${className}; checking next train.`);
+      continue;
     }
+
+    const classKey = className.match(/\(([A-Z0-9-]+)\)/i)?.[1] || className;
+    const classControl = row.getByText(new RegExp(classKey, 'i')).first();
+    const action = classControl.locator(
+      'xpath=ancestor::*[self::td or self::li or contains(@class,"class") or contains(@class,"Class")][1]'
+    ).locator('button:enabled, [role="button"], a').first();
+
+    if (await action.isVisible({ timeout: 1500 }).catch(() => false)) await action.click();
+    console.log(`Selected ${trainNumber} with available ${className} seats.`);
+    return true;
   }
 
-  console.log('No configured preferred train was detected automatically.');
+  console.log('No preferred or fallback train with refreshed available seats was found.');
   return false;
 }
 
@@ -336,7 +401,7 @@ async function runFlow(page, config) {
   await fillJourney(page, config);
   await sleep(2500);
   await handleLoginCheckpoint(page, config, 'continuing after train search');
-  await choosePreferredTrain(page, config.preferredTrains);
+  await choosePreferredTrain(page, config.preferredTrains, config.journey.class);
 
   await pauseForUser(
     page,
