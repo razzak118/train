@@ -7,11 +7,6 @@
     "class": "Sleeper (SL)",
     "quota": "GENERAL"
   },
-  "preferredTrains": [
-    "13201",
-    "12142",
-    "12335"
-  ],
   "passengers": [
     {
       "name": "Razzak Ansari",

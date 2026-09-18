@@ -407,6 +407,7 @@ async function bookAvailableClass(row, section, journeyDate) {
   }
 
   const tryDateOptions = async optionLocator => {
+    const matches = [];
     for (let index = 0; index < await optionLocator.count(); index += 1) {
       const option = optionLocator.nth(index);
       const text = await option.innerText().catch(() => '');
@@ -414,6 +415,13 @@ async function bookAvailableClass(row, section, journeyDate) {
           !dateMatches(text, journeyDate) ||
           !/\b(?:AVAILABLE|AVL|RAC)\b/i.test(text) ||
           /\b(?:WL|WAITING|REGRET|NOT\s+AVAILABLE|CANCELLED)\b/i.test(text)) continue;
+
+      matches.push({ option, text: text.trim() });
+    }
+
+    matches.sort((left, right) => left.text.length - right.text.length);
+    for (const { option, text } of matches) {
+      if (!await option.isVisible().catch(() => false)) continue;
 
       console.log(`Selecting ${journeyDate} availability: ${text.slice(0, 120)}`);
       await option.click();
@@ -442,22 +450,34 @@ async function bookAvailableClass(row, section, journeyDate) {
   return false;
 }
 
-async function choosePreferredTrain(page, preferredTrains, className, journeyDate) {
-  const preferred = preferredTrains?.map(String) || [];
-  const numberPattern = preferred.length ? preferred.join('|') : '\\d{4,5}';
-
-  await page.waitForFunction(
-    pattern => new RegExp(`\\b(?:${pattern})\\b`).test(document.body.innerText),
-    numberPattern,
+async function chooseAvailableTrain(page, className, journeyDate) {
+  const resultReady = await page.waitForFunction(
+    () => Boolean(document.querySelector('app-train-avl-enq, [class*="train-avl"], [class*="train_avl"]')) ||
+      /Train\s*(?:Name|Number|No\.?)/i.test(document.body.innerText),
     { timeout: 45000 }
-  ).catch(() => {});
+  ).then(() => true).catch(() => false);
 
-  const numbers = [...preferred];
-  const visibleNumbers = await page.locator('text=/\\b\\d{4,5}\\b/').allTextContents().catch(() => []);
-  for (const value of visibleNumbers) {
-    const number = value.match(/\b\d{4,5}\b/)?.[0];
+  if (!resultReady) {
+    console.log('IRCTC did not render a train-results view within 45 seconds.');
+    return false;
+  }
+
+  const numbers = [];
+  const components = page.locator('app-train-avl-enq');
+  for (let index = 0; index < await components.count(); index += 1) {
+    const text = await components.nth(index).innerText().catch(() => '');
+    const number = text.match(/\b\d{4,5}\b/)?.[0];
     if (number && !numbers.includes(number)) numbers.push(number);
   }
+
+  if (!numbers.length) {
+    const pageText = await page.locator('body').innerText().catch(() => '');
+    for (const value of pageText.match(/\b\d{4,5}\b/g) || []) {
+      if (!numbers.includes(value)) numbers.push(value);
+    }
+  }
+
+  console.log(`Checking ${numbers.length} trains in page order for ${className} on ${journeyDate}.`);
 
   for (const trainNumber of numbers) {
     const row = await findTrainRow(page, trainNumber);
@@ -478,7 +498,7 @@ async function choosePreferredTrain(page, preferredTrains, className, journeyDat
     return true;
   }
 
-  console.log('No preferred or fallback train with refreshed available seats was found.');
+  console.log(`No train with refreshed available ${className} seats was found for ${journeyDate}.`);
   return false;
 }
 
@@ -518,11 +538,9 @@ async function runFlow(page, config) {
   await tryLogin(page, config);
 
   await fillJourney(page, config);
-  await sleep(2500);
   await handleLoginCheckpoint(page, config, 'continuing after train search');
-  const selectedTrain = await choosePreferredTrain(
+  const selectedTrain = await chooseAvailableTrain(
     page,
-    config.preferredTrains,
     config.journey.class,
     config.journey.date
   );
@@ -534,6 +552,12 @@ async function runFlow(page, config) {
     );
   }
 
+  await page.waitForFunction(
+    () => Boolean(document.querySelector(
+      'input[placeholder*="Passenger Name"], input[aria-label*="Passenger Name"], input[type="password"]'
+    )) || /passenger|psgn/i.test(location.href),
+    { timeout: 20000 }
+  ).catch(() => {});
   await handleLoginCheckpoint(page, config, 'opening the passenger form');
   await fillPassengers(page, config.passengers);
 
