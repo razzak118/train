@@ -325,11 +325,15 @@ async function fillJourney(page, config) {
 }
 
 async function findTrainRow(page, trainNumber) {
-  const number = page.getByText(String(trainNumber), { exact: true }).first();
+  const pattern = new RegExp(`\\b${trainNumber}\\b`);
+  const component = page.locator('app-train-avl-enq').filter({ hasText: pattern }).first();
+  if (await component.isVisible({ timeout: 2500 }).catch(() => false)) return component;
+
+  const number = page.getByText(pattern).first();
   if (!await number.isVisible({ timeout: 1500 }).catch(() => false)) return null;
 
   return number.locator(
-    'xpath=ancestor::*[(self::tr or self::li or contains(@class,"train") or contains(@class,"Train")) and (.//button or .//*[@role="button"])][1]'
+    'xpath=ancestor::*[(self::tr or self::li or contains(@class,"train") or contains(@class,"Train") or contains(@class,"card")) and (.//button or .//*[@role="button"])][1]'
   ).first();
 }
 
@@ -339,11 +343,16 @@ function classCode(className) {
 
 async function findClassSection(row, className) {
   const code = classCode(className);
-  const label = row.getByText(new RegExp(`^\\s*${code}\\s*$`, 'i')).first();
+  const tile = row.locator('.pre-avl, [class*="pre-avl"], [class*="class-avl"], [class*="classAvl"]')
+    .filter({ hasText: new RegExp(`${code}|${className.replace(/[()]/g, '\\$&')}`, 'i') })
+    .first();
+  if (await tile.isVisible({ timeout: 1500 }).catch(() => false)) return tile;
+
+  const label = row.getByText(new RegExp(`${code}|${className.replace(/[()]/g, '\\$&')}`, 'i')).first();
   if (!await label.isVisible({ timeout: 1500 }).catch(() => false)) return null;
 
   return label.locator(
-    'xpath=ancestor::*[(self::td or self::li or contains(@class,"class") or contains(@class,"Class") or contains(@class,"avl") or contains(@class,"Avl"))][1]'
+    'xpath=ancestor::*[(self::td or self::li or contains(@class,"class") or contains(@class,"Class") or contains(@class,"avl") or contains(@class,"Avl") or contains(@class,"pre"))][1]'
   ).first();
 }
 
@@ -354,34 +363,86 @@ async function refreshClass(section) {
     'button[title*="refresh" i]',
     '[role="button"][aria-label*="refresh" i]',
     'button:has-text("Refresh")',
+    'a:has-text("Refresh")',
+    '[role="link"]:has-text("Refresh")',
+    '.link:has-text("Refresh")',
+    'i[class*="refresh" i]',
+    'i[class*="repeat" i]',
     '.fa-refresh',
+    '.fa-repeat',
     '.pi-refresh'
   ].join(', '));
   const control = refreshControls.first();
   if (!await control.isVisible({ timeout: 1500 }).catch(() => false)) return false;
   await control.click().catch(async () => {
-    await control.locator('xpath=..').click();
+    await control.locator('xpath=..').click().catch(async () => {
+      await control.locator('xpath=../..').click();
+    });
   });
-  await sleep(800);
+  await sleep(1500);
   return true;
 }
 
-async function bookAvailableClass(section) {
+function dateMatches(text, date) {
+  const [day, month, year] = date.split('/');
+  const monthNames = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+  const monthName = monthNames[Number(month) - 1];
+  return text.includes(date) ||
+    new RegExp(`\\b${day}\\s*[-/ ]?\\s*(?:${month}|${Number(month)}|${monthName}|${monthName.slice(0, 3)})\\b`, 'i').test(text);
+}
+
+async function bookAvailableClass(row, section, journeyDate) {
   if (!section) return false;
-  const text = await section.innerText().catch(() => '');
-  const available = /\b(?:AVAILABLE|AVL|RAC)\b/i.test(text) &&
-    !/\b(?:WL|WAITING|REGRET|NOT\s+AVAILABLE|CANCELLED)\b/i.test(text);
-  if (!available) return false;
+  const availabilityArea = row.locator('[avllazyload]').first();
+  await availabilityArea.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+  let options = availabilityArea.locator('button, a, [role="button"], [role="link"], [tabindex]');
 
-  const book = section.locator(
-    'button:enabled, a, [role="button"]'
-  ).filter({ hasText: /BOOK(?: NOW)?/i }).first();
-  if (!await book.isVisible({ timeout: 1500 }).catch(() => false)) return false;
-  await book.click();
-  return true;
+  if (!await availabilityArea.isVisible({ timeout: 500 }).catch(() => false) ||
+      await options.count() === 0) {
+    options = row.locator('button, a, [role="button"], [role="link"], [tabindex], div, span')
+      .filter({ hasText: /AVAILABLE|AVL|RAC/i });
+  }
+
+  const tryDateOptions = async optionLocator => {
+    for (let index = 0; index < await optionLocator.count(); index += 1) {
+      const option = optionLocator.nth(index);
+      const text = await option.innerText().catch(() => '');
+      if (!await option.isVisible().catch(() => false) || text.length > 220 ||
+          !dateMatches(text, journeyDate) ||
+          !/\b(?:AVAILABLE|AVL|RAC)\b/i.test(text) ||
+          /\b(?:WL|WAITING|REGRET|NOT\s+AVAILABLE|CANCELLED)\b/i.test(text)) continue;
+
+      console.log(`Selecting ${journeyDate} availability: ${text.slice(0, 120)}`);
+      await option.click();
+      await sleep(700);
+      const book = row.locator(
+        'button.train_Search:not(.disable-book), button:has-text("Book Now"), button:has-text("Book")'
+      ).last();
+      if (!await book.isVisible({ timeout: 3000 }).catch(() => false)) return false;
+      await book.click();
+      return true;
+    }
+    return false;
+  };
+
+  if (await tryDateOptions(options)) return true;
+
+  // Some IRCTC builds render date choices as clickable div/span tiles without
+  // tabindex or an ARIA role.
+  const renderedDateTiles = row.locator('div, span, li').filter({
+    hasText: /AVAILABLE|AVL|RAC/i
+  });
+  if (await tryDateOptions(renderedDateTiles)) return true;
+
+  const areaText = await row.innerText().catch(() => '');
+  console.log(`No available option for ${journeyDate}: ${areaText.slice(0, 180)}`);
+  return false;
 }
 
-async function choosePreferredTrain(page, preferredTrains, className) {
+async function choosePreferredTrain(page, preferredTrains, className, journeyDate) {
   const preferred = preferredTrains?.map(String) || [];
   const numberPattern = preferred.length ? preferred.join('|') : '\\d{4,5}';
 
@@ -409,7 +470,7 @@ async function choosePreferredTrain(page, preferredTrains, className) {
       continue;
     }
 
-    if (!await bookAvailableClass(section)) {
+    if (!await bookAvailableClass(row, section, journeyDate)) {
       console.log(`Train ${trainNumber} has no available ${className}; checking next train.`);
       continue;
     }
@@ -459,12 +520,19 @@ async function runFlow(page, config) {
   await fillJourney(page, config);
   await sleep(2500);
   await handleLoginCheckpoint(page, config, 'continuing after train search');
-  await choosePreferredTrain(page, config.preferredTrains, config.journey.class);
-
-  await pauseForUser(
+  const selectedTrain = await choosePreferredTrain(
     page,
-    'TRAIN CHECKPOINT: verify/select the intended train and class in the browser, then press Enter to continue.'
+    config.preferredTrains,
+    config.journey.class,
+    config.journey.date
   );
+
+  if (!selectedTrain) {
+    await pauseForUser(
+      page,
+      'TRAIN CHECKPOINT: automatic selection did not find an available train. Verify/select the intended train and class in the browser, then press Enter to continue.'
+    );
+  }
 
   await handleLoginCheckpoint(page, config, 'opening the passenger form');
   await fillPassengers(page, config.passengers);
