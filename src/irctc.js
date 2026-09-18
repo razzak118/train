@@ -425,12 +425,36 @@ async function bookAvailableClass(row, section, journeyDate) {
 
       console.log(`Selecting ${journeyDate} availability: ${text.slice(0, 120)}`);
       await option.click();
-      await sleep(700);
+      await section.getByText(/AVAILABLE|AVL|RAC/i).first()
+        .waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
       const book = row.locator(
-        'button.train_Search:not(.disable-book), button:has-text("Book Now"), button:has-text("Book")'
-      ).last();
+        'button.train_Search:not(.disable-book), button[aria-label*="Book" i], button[title*="Book" i]'
+      ).first();
       if (!await book.isVisible({ timeout: 3000 }).catch(() => false)) return false;
       await book.click();
+
+      const page = row.page();
+      const outcome = await page.waitForFunction(
+        () => /passenger|psgn/i.test(location.href) ||
+          Boolean(document.querySelector('input[placeholder*="Passenger Name"], input[aria-label*="Passenger Name"]')) ||
+          Array.from(document.querySelectorAll('[role="dialog"]:visible, .ui-dialog:visible, .ui-toast-message:visible'))
+            .some(node => /Unable to Process Request|Please select class|Error!/i.test(node.innerText || '')),
+        { timeout: 15000 }
+      ).then(() => true).catch(() => false);
+
+      if (!outcome) {
+        console.log('Book request did not produce a passenger page within 15 seconds.');
+        return false;
+      }
+
+      const errorOverlay = page.locator(
+        '[role="dialog"]:visible, .ui-dialog:visible, .ui-toast-message:visible'
+      ).filter({ hasText: /Unable to Process Request|Please select class|Error!/i }).first();
+      if (await errorOverlay.isVisible({ timeout: 500 }).catch(() => false)) {
+        throw new Error(
+          'IRCTC rejected the Book request. The session/IP request was refused; close the error and retry with a fresh session.'
+        );
+      }
       return true;
     }
     return false;
