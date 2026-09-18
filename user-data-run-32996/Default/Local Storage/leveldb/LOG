@@ -1,0 +1,4 @@
+2026/09/18-11:18:04.742 8192 Creating DB /home/razzak/Downloads/irctc-booking-assistant/user-data-run-32996/Default/Local Storage/leveldb since it was missing.
+2026/09/18-11:18:04.758 8192 Reusing MANIFEST /home/razzak/Downloads/irctc-booking-assistant/user-data-run-32996/Default/Local Storage/leveldb/MANIFEST-000001
+2026/09/18-11:18:28.709 8192 Level-0 table #5: started
+2026/09/18-11:18:28.718 8192 Level-0 table #5: 332392 bytes OK

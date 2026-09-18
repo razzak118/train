@@ -1,0 +1,29 @@
+{
+  "url": "https://www.irctc.co.in/nget/train-search",
+  "journey": {
+    "from": "KYN",
+    "to": "BUI",
+    "date": "25/09/2026",
+    "class": "Sleeper (SL)",
+    "quota": "GENERAL"
+  },
+  "preferredTrains": [
+    "12925",
+    "22943",
+    "19031"
+  ],
+  "passengers": [
+    {
+      "name": "Razzak Ansari",
+      "age": 21,
+      "gender": "Male",
+      "berth": "No Preference"
+    }
+  ],
+  "options": {
+    "startLoggedIn": true,
+    "fillLoginCredentials": true,
+    "pauseForCaptcha": true,
+    "pauseBeforePayment": true
+  }
+}

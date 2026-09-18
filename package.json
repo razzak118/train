@@ -1,0 +1,16 @@
+{
+  "name": "irctc-booking-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright learning project for assisted IRCTC browser navigation. CAPTCHA, OTP, and payment approval remain human steps.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "headed": "node src/main.js",
+    "codegen": "playwright codegen https://www.irctc.co.in/nget/train-search"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "playwright": "^1.55.0"
+  }
+}
