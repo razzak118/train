@@ -198,6 +198,38 @@ async function withLoginRecovery(page, config, action, reason) {
   }
 }
 
+async function setJourneyDate(dateField, date) {
+  for (const method of ['keyboard', 'fill']) {
+    await dateField.click();
+    if (method === 'keyboard') {
+      await dateField.press('Control+A');
+      await dateField.press('Backspace');
+      await dateField.type(date, { delay: 40 });
+    } else {
+      await dateField.fill(date);
+    }
+    await dateField.press('Tab');
+    await pageWaitForDateCommit(dateField);
+
+    if (await dateField.inputValue() === date) return;
+  }
+
+  const actualDate = await dateField.inputValue();
+  throw new Error(`Journey date was not committed: expected ${date}, got ${actualDate || '(empty)'}`);
+}
+
+async function pageWaitForDateCommit(dateField) {
+  const page = dateField.page();
+  await page.waitForTimeout(300);
+  const calendar = page.locator(
+    '.ui-datepicker:visible, .p-datepicker:visible, [class*="datepicker"]:visible'
+  ).first();
+  if (await calendar.isVisible({ timeout: 500 }).catch(() => false)) {
+    await dateField.press('Escape');
+    await page.waitForTimeout(200);
+  }
+}
+
 async function fillJourney(page, config) {
   const { from, to, date } = config.journey;
 
@@ -234,26 +266,7 @@ async function fillJourney(page, config) {
     await withLoginRecovery(
       page,
       config,
-      async () => {
-        await dateField.click();
-        await dateField.press('Control+A');
-        await dateField.press('Backspace');
-        await dateField.type(date, { delay: 40 });
-        await dateField.press('Enter');
-        await page.waitForTimeout(300);
-
-        const calendar = page.locator(
-          '.ui-datepicker:visible, .p-datepicker:visible, [class*="datepicker"]:visible'
-        ).first();
-        if (await calendar.isVisible({ timeout: 500 }).catch(() => false)) {
-          await dateField.press('Escape');
-        }
-
-        const enteredDate = await dateField.inputValue();
-        if (enteredDate !== date) {
-          throw new Error(`Journey date was not committed: expected ${date}, got ${enteredDate || '(empty)'}`);
-        }
-      },
+      () => setJourneyDate(dateField, date),
       'filling the journey date'
     );
   } else {
